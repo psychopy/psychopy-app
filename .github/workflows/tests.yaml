@@ -35,6 +35,7 @@ jobs:
       uses: astral-sh/setup-uv@v7
       with:
         activate-environment: true
+        enable-cache: true
 
     - name: Checkout PsychoPy (lib)
       uses: actions/checkout@v3
