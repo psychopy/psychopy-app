@@ -27,7 +27,7 @@ dependencies = [
     "psychopy",
     "websockets",  # new in 2023.2 for session.py
     # for the app
-    "wxPython >= 4.1.1",
+    "wxPython>=4.1.1,<4.3.0",
     "markdown-it-py",
     "requests",
     "future",  # only to support legacy versions in useVersion
