@@ -307,8 +307,9 @@ class AppSigner:
         if Path(dmgFilename).exists():
             os.remove(dmgFilename)
         # then build new one
+        self._detachStaleVolumes()
 
-        icon = (thisFolder.parent /
+        icon =(thisFolder.parent /
                 'src/psychopy_app/Resources/psychopy.icns').resolve()
         background = (thisFolder / "dmg722x241.tiff").resolve()
         dmgbuild.build_dmg(
@@ -316,6 +317,7 @@ class AppSigner:
                 volume_name=f'PsychoPy-{self.version}',  # avoid spaces
                 settings={
                     'format': 'UDRW',
+                    'filesystem': 'HFS+',  # specify the filesystem type for the dmg
                     'files': [str(self.appFile)],
                     'symlinks': { 'Applications': '/Applications' },
                     'size': '3g',  # but maybe irrelevant in UDRW mode?
@@ -332,30 +334,99 @@ class AppSigner:
         unbuffered_print(f"building dmg file complete")
         return dmgFilename
 
+    @staticmethod
+    def _detachStaleVolumes():
+        """Detach any PsychoPy volumes left mounted (e.g. by a previous run) so
+        they can't clash with the volume name of the dmg we're about to mount"""
+        for volume in Path("/Volumes").glob("PsychoPy*"):
+            unbuffered_print(f"Detaching stale volume {volume}")
+            AppSigner._detachDmg(volume)
+
+    @staticmethod
+    def _attachDmg(dmgFilename, readonly=False):
+        """Attach a dmg without showing it to Finder/Spotlight
+
+        Returns:
+            (mountPoint, device) where device is the parent disk (for detaching)
+        """
+        import plistlib
+        cmd = ['hdiutil', 'attach', '-nobrowse', '-noverify', '-plist', str(dmgFilename)]
+        if readonly:
+            cmd.insert(2, '-readonly')
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            unbuffered_print(f"[Error] Failed to attach {dmgFilename}: {result.stderr.decode()}")
+            exit(1)
+        entities = plistlib.loads(result.stdout)['system-entities']
+        mountPoints = [e['mount-point'] for e in entities if 'mount-point' in e]
+        devices = [e['dev-entry'] for e in entities if 'dev-entry' in e]
+        if not mountPoints:
+            unbuffered_print(f"[Error] {dmgFilename} attached but has no mount point")
+            subprocess.getstatusoutput(f"hdiutil detach -force {devices[0]}")
+            exit(1)
+        parentDevice = min(devices, key=len)  # e.g. /dev/disk8 rather than /dev/disk8s1
+        unbuffered_print(f"Attached {dmgFilename} at {mountPoints[0]} ({parentDevice})")
+        return mountPoints[0], parentDevice
+
+    @staticmethod
+    def _detachDmg(device, attempts=6):
+        """Flush writes and detach a dmg (by device or mount point), retrying
+        with increasing waits, then forcing. Exits if it can't be detached because
+        converting an image that is still attached can produce a corrupt dmg"""
+        subprocess.getstatusoutput("sync")
+        waitTime = 2
+        for attemptN in range(attempts):
+            exitcode, output = subprocess.getstatusoutput(f"hdiutil detach '{device}'")
+            unbuffered_print(f"Detach attempt {attemptN}: {output}")
+            if exitcode == 0:
+                return
+            time.sleep(waitTime)
+            waitTime *= 1.5
+        exitcode, output = subprocess.getstatusoutput(f"hdiutil detach -force '{device}'")
+        unbuffered_print(f"Forced detach: {output}")
+        if exitcode != 0:
+            unbuffered_print(f"[Error] Failed to detach {device}")
+            exit(1)
+
+    def dmgVerify(self, dmgFilename, exitOnFail=True):
+        """Mount the dmg read-only and check the signature of the app inside it.
+
+        Notarization of the dmg would fail anyway if this fails (e.g. if files
+        changed during the copy into the dmg)
+
+        Returns:
+            True if the app inside the dmg passes `codesign --verify`,
+            False if not (or exits if exitOnFail)
+        """
+        appName = self.appFile.name
+        unbuffered_print(f"Verifying signature of {appName} inside {dmgFilename}")
+        mountPoint, device = self._attachDmg(dmgFilename, readonly=True)
+        try:
+            appInDmg = Path(mountPoint) / appName
+            cmdStr = f"codesign --verify --strict --deep -vvvv '{appInDmg}'"
+            unbuffered_print(cmdStr)
+            exitcode, output = subprocess.getstatusoutput(cmdStr)
+            unbuffered_print(output)
+        finally:
+            self._detachDmg(device)
+        if exitcode != 0:
+            unbuffered_print(f"[Error] {appName} inside {dmgFilename} failed codesign verification")
+            if exitOnFail:
+                exit(exitcode)
+            return False
+        unbuffered_print(f"{appName} inside {dmgFilename} passed codesign verification")
+        return True
+
     def dmgStapleInside(self):
+        """Staple the notarization to the app inside the r/w dmg file"""
         dmgFilename = str(self.appFile).replace(".app", "_rw.dmg")
         appName = self.appFile.name
-        """Staple the notarization to the app inside the r/w dmg file"""
-        # staple the file inside the dmg
-        cmdStr = f"hdiutil attach '{dmgFilename}'"
-        exitcode, output = subprocess.getstatusoutput(cmdStr)
-        # subprocess.getstatusoutput("say 'waiting' --voice=Kate")
-        time.sleep(10)
-        volName = output.split('\t')[-1]
-        self.staple(f"'{volName}/{appName}'")
-    
-        time.sleep(10)  # wait for 10s and then try more forcefully
-
-        # try to eject all volumens with PsychoPy in the name
-        for volume in Path("/Volumes").glob("PsychoPy*"):
-            # Eject the disk image
-            for attemptN in range(5):
-                exitcode, output = subprocess.getstatusoutput(f"diskutil eject {volume}")
-                unbuffered_print(f"Attempt {attemptN}: {output}"); sys.stdout.flush()
-                if exitcode == 0:
-                    break
-                # have a rest and try again
-                time.sleep(5)
+        self._detachStaleVolumes()
+        mountPoint, device = self._attachDmg(dmgFilename)
+        try:
+            self.staple(f"'{mountPoint}/{appName}'")
+        finally:
+            self._detachDmg(device)
 
     def dmgCompress(self):
         dmgFilename = str(self.appFile).replace(".app", "_rw.dmg")
@@ -371,7 +442,8 @@ class AppSigner:
             unbuffered_print(output)
             if exitcode == 0:
                 return dmgFinalFilename
-        
+            time.sleep(5)  # have a rest and try again
+
         raise RuntimeError(f'****Failed to compress {dmgFilename} to {dmgFinalFilename} (is it not ejected?) ****')
 
 
@@ -456,7 +528,12 @@ def main():
                 unbuffered_print(f'Signer.upload("{signer.zipFile}")'); sys.stdout.flush()
                 signer.upload(signer.zipFile)
             # build the read/writable dmg file (while waiting for notarize)
-            signer.dmgBuild()
+            dmgFilename = signer.dmgBuild()
+            if not signer.dmgVerify(dmgFilename, exitOnFail=False):
+                # corruption during dmgbuild seems to be intermittent so try once more
+                unbuffered_print("[Warning] App inside dmg failed verification. Rebuilding dmg")
+                dmgFilename = signer.dmgBuild()
+                signer.dmgVerify(dmgFilename)
             if NOTARIZE:
                 # notarize and staple
                 unbuffered_print(f'Signer.awaitNotarized()'); sys.stdout.flush()
@@ -467,6 +544,7 @@ def main():
             signer.dmgStapleInside()  # doesn't require UUID
             unbuffered_print(f'Signer.dmgCompress()'); sys.stdout.flush()
             dmgFile = signer.dmgCompress()
+            signer.dmgVerify(dmgFile)
             unbuffered_print(f'Signer.signSingleFile(dmgFile'); sys.stdout.flush()
             signer.signSingleFile(dmgFile, removeFailed=False, verbose=True)
 
