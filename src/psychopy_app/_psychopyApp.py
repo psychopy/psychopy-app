@@ -241,20 +241,32 @@ class PsychoPyApp(wx.App, handlers.ThemeMixin):
         # import localization after wx:
         from psychopy import localization  # needed by splash screen
         self.localization = localization
-        # get locale from prefs
-        if self.prefs.app['locale'] in (None, "system locale", "system"):
-            locale = localization.getLocale()
-        else:
-            locale = self.prefs.app['locale']
-        # convert locale to a format wx likes
+        # figure out locale
         try:
-            locale = wx.Locale.FindLanguageInfo(
-                locale.replace("-", "_")
-            ).Language
-        except:
-            locale = wx.Locale.GetSystemLanguage()
-        if not wx.Locale.IsAvailable(locale):
-            locale = wx.Locale.GetSystemLanguage()
+            # get locale from prefs
+            if self.prefs.app['locale'] in (None, "system locale", "system"):
+                locale = localization.getLocale()
+            else:
+                locale = self.prefs.app['locale']
+            # convert locale to a format wx likes
+            info = wx.Locale.FindLanguageInfo(
+                str(locale).replace("-", "_")
+            )
+            if info is None:
+                # if wx doesn't recognise the locale, try the system language
+                locale = wx.Locale.GetSystemLanguage()
+            else:
+                locale = info.Language
+            # is language available?
+            # (silly as it sounds, sometimes wx.Locale.GetSystemLanguage() returns one that isn't)
+            if not wx.Locale.IsAvailable(locale):
+                raise ValueError(f"wx language {locale} is not available")
+        except Exception as err:
+            # fallback to US English so the app at least launches
+            logging.warning(
+                f"Could not set app locale, falling back to en_US. Reason: {err}"
+            )
+            locale = wx.LANGUAGE_ENGLISH_US
         # set locale
         self.locale = wx.Locale(locale)
         self.localization.setLocale(
