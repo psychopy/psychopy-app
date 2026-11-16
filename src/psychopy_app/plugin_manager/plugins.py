@@ -1385,23 +1385,19 @@ def getAllPluginDetails():
                 The name of the package to fetch versions for.
             
             """
-            import re
-            from bs4 import BeautifulSoup
-            url = 'https://pypi.org/simple/' + packageName + '/'
+            # construct and send request
+            url = 'https://pypi.org/pypi/' + packageName + '/json'
             response = requests.get(url)
+            # catch failure
             if response.status_code != 200:
                 raise Exception(f"Failed to fetch {url}: {response.status_code}")
-            
-            # parse the HTML content
-            soup = BeautifulSoup(response.text, 'html.parser')
-            versions = set()
-            for a in soup.find_all('a', href=True):
-                match = re.search(rf'{packageName}-(\d+\.\d+\.\d+)', a['href'], re.IGNORECASE)
-                if match:
-                    version = match.group(1)
-                    versions.add(version)
-
-            versions = list(versions)
+            # get details from response
+            profile = response.json()
+            # catch if it returned something that doesn't look right
+            if "releases" not in profile:
+                raise Exception(f"Could not get versions from {url}, got: {profile}")
+            # get versions
+            versions = list(profile['releases'].keys())
             versions.sort(key=Version)
 
             return versions
